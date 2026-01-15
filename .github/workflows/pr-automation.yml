@@ -1,0 +1,203 @@
+name: PR Automation Workflow
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run ESLint
+        id: eslint
+        run: |
+          npm run lint -- --format=compact > eslint-results.txt || true
+          echo "eslint_output=$(cat eslint-results.txt)" >> $GITHUB_OUTPUT
+      - name: Run Prettier check
+        id: prettier
+        run: |
+          npx prettier --check . > prettier-results.txt || true
+          echo "prettier_output=$(cat prettier-results.txt)" >> $GITHUB_OUTPUT
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { eslint_output, prettier_output } = process.env;
+            const commentBody = `
+            ## Code Quality Report
+            ### ESLint Results
+            \`\`\`
+            ${eslint_output || 'No ESLint results'}
+            \`\`\`
+            ### Prettier Results
+            \`\`\`
+            ${prettier_output || 'No Prettier results'}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+        env:
+          eslint_output: ${{ steps.eslint.outputs.eslint_output }}
+          prettier_output: ${{ steps.prettier.outputs.prettier_output }}
+
+  testing-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests with coverage
+        id: tests
+        run: |
+          npm test -- --coverage > test-coverage.txt || true
+          echo "coverage_output=$(cat test-coverage.txt)" >> $GITHUB_OUTPUT
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage
+          path: coverage/
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { coverage_output } = process.env;
+            const commentBody = `
+            ## Test Coverage Report
+            \`\`\`
+            ${coverage_output || 'No coverage results'}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+        env:
+          coverage_output: ${{ steps.tests.outputs.coverage_output }}
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run dependency vulnerability check (npm audit)
+        id: npm-audit
+        run: |
+          npm audit --audit-level=moderate > npm-audit-results.txt || true
+          echo "npm_audit_output=$(cat npm-audit-results.txt)" >> $GITHUB_OUTPUT
+      - name: Scan for secrets (Gitleaks)
+        id: gitleaks
+        uses: zricethezav/gitleaks-action@v2
+        with:
+          args: --report=json
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { npm_audit_output } = process.env;
+            const fs = require('fs');
+            const gitleaksOutput = fs.existsSync('./gitleaks-report.json') 
+              ? JSON.stringify(JSON.parse(fs.readFileSync('./gitleaks-report.json', 'utf8')), null, 2)
+              : 'No secrets found (gitleaks report not generated)';
+            const commentBody = `
+            ## Security Scan Report
+            ### Dependencies Vulnerabilities
+            \`\`\`
+            ${npm_audit_output || 'No dependency vulnerability results'}
+            \`\`\`
+            ### Secrets Scan Results
+            \`\`\`
+            ${gitleaksOutput}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+        env:
+          npm_audit_output: ${{ steps.npm-audit.outputs.npm_audit_output }}
+
+  build-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Build the application
+        id: build
+        run: |
+          npm run build > build-results.txt || true
+          echo "build_output=$(cat build-results.txt)" >> $GITHUB_OUTPUT
+      - name: Validate application endpoints
+        id: endpoints
+        run: |
+          # Start application server in background
+          npm start &
+          SERVER_PID=$!
+          # Wait for server to initialize
+          sleep 10
+          # Check default endpoint (adjust port/path as needed for your application)
+          curl -I http://localhost:3000 > endpoint-checks.txt || true
+          echo "endpoint_output=$(cat endpoint-checks.txt)" >> $GITHUB_OUTPUT
+          # Stop the server
+          kill $SERVER_PID 2>/dev/null || true
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-preview
+          path: dist/
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { build_output, endpoint_output } = process.env;
+            const commentBody = `
+            ## Build Validation
+            ### Build Results
+            \`\`\`
+            ${build_output || 'No build results'}
+            \`\`\`
+            ### Endpoint Validation Results
+            \`\`\`
+            ${endpoint_output || 'No endpoint validation results'}
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: commentBody
+            });
+        env:
+          build_output: ${{ steps.build.outputs.build_output }}
+          endpoint_output: ${{ steps.endpoints.outputs.endpoint_output }}
